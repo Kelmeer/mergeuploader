@@ -8,24 +8,20 @@ import time
 import shutil
 import logging
 import json
+import webbrowser
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Set, Any
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk
+import ttkbootstrap as ttk
+from ttkbootstrap.constants import *
+from tkinter import filedialog
 from threading import Thread
 import requests
 from io import BytesIO
 from PIL import Image, ImageTk
-
-try:
-    import ttkbootstrap as ttk
-    from ttkbootstrap.constants import *
-except ImportError:
-    print("Ошибка: Библиотека 'ttkbootstrap' не найдена.")
-    print("Пожалуйста, установите ее: pip install ttkbootstrap")
-    sys.exit(1)
 
 try:
     import google_auth_oauthlib.flow
@@ -52,17 +48,19 @@ SETTINGS_FILE = Path("settings.json")
 TOKEN_PICKLE_FILE = Path("token.pickle")
 UPLOADED_LOG_FILE = Path("uploaded_videos.log")
 CLIENT_SECRETS_FILE = Path("client_secrets.json")
+BASE_DIR = Path.cwd()
 
 # --- Константы YouTube API ---
 API_SERVICE_NAME = "youtube"
 API_VERSION = "v3"
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/userinfo.profile"]
+SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly", "https://www.googleapis.com/auth/userinfo.profile"]
+VIDEO_UPLOAD_QUOTA_COST = 1600  # Стоимость загрузки одного видео (единиц)
 
 class VideoMergerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Video Merger and YouTube Uploader")
-        self.root.geometry("800x950")  # Изменено с 1080 на 950
+        self.root.geometry("800x950")
 
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -73,6 +71,8 @@ class VideoMergerApp:
         style.configure("TEntry", font=("Helvetica", 10))
         style.configure("TCombobox", font=("Helvetica", 10))
         style.configure("TCheckbutton", font=("Helvetica", 10))
+        style.configure("custom.TButton", borderwidth=0, background="#2b2b2b", relief="flat")
+        style.map("custom.TButton", background=[("active", "#2b2b2b")])
 
         self.input_folder = tk.StringVar()
         self.output_folder = tk.StringVar()
@@ -90,9 +90,12 @@ class VideoMergerApp:
         self.privacy_status = tk.StringVar(value="private")
 
         self.youtube_service = None
+        self.analytics_service = None
         self.account_name = tk.StringVar(value="Не авторизован")
         self.account_image = None
-        self.progress = None  # Будет инициализирован в create_gui
+        self.progress = None
+        self.doughnut_image = None
+        self.qr_image = None
 
         self.load_settings()
         self.create_gui()
@@ -149,6 +152,9 @@ class VideoMergerApp:
     def on_closing(self):
         self.save_settings()
         self.root.destroy()
+
+    def open_donation_link(self):
+        webbrowser.open("https://www.donationalerts.com/r/dr_klmn")
 
     def create_gui(self):
         main_frame = ttk.Frame(self.root, padding="15", bootstyle="dark")
@@ -233,7 +239,27 @@ class VideoMergerApp:
         self.log_text = tk.Text(log_frame, height=7, font=("Helvetica", 10), bg="#2b2b2b", fg="#ffffff", insertbackground="white")
         self.log_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
 
-        ttk.Button(main_frame, text="Запустить обработку", command=self.start_processing, bootstyle="success").grid(row=4, column=0, columnspan=3, pady=15)
+        # Кнопка "Запустить обработку" (слева, без фона) и кнопка с Doughnut.png (справа) в одной строке
+        button_frame = ttk.Frame(main_frame, bootstyle="")
+        button_frame.grid(row=4, column=0, columnspan=3, pady=15, sticky=(tk.W, tk.E))
+
+        # Кнопка "Запустить обработку" (слева)
+        ttk.Button(button_frame, text="Запустить обработку", command=self.start_processing, bootstyle="success").grid(row=0, column=0, sticky=tk.SW, padx=(0, 10))
+
+        # Кнопка с Doughnut.png (справа)
+        try:
+            doughnut_img = Image.open("Doughnut.png").resize((25, 25), Image.LANCZOS)
+            if doughnut_img.mode != "RGBA":
+                doughnut_img = doughnut_img.convert("RGBA")
+            self.doughnut_image = ImageTk.PhotoImage(doughnut_img)
+            doughnut_button = ttk.Button(button_frame, image=self.doughnut_image, command=self.open_donation_link, style="custom.TButton")
+            doughnut_button.grid(row=0, column=1, sticky=tk.SE, padx=(10, 0))
+        except Exception as e:
+            log.error(f"Не удалось загрузить Doughnut.png: {e}")
+
+        # Устанавливаем вес столбцов для равномерного распределения
+        button_frame.columnconfigure(0, weight=1)
+        button_frame.columnconfigure(1, weight=1)
 
         handler = TextHandler(self.log_text, self.root)
         log.addHandler(handler)
@@ -255,9 +281,124 @@ class VideoMergerApp:
 
     def start_processing(self):
         if not self.input_folder.get() or not self.output_folder.get():
-            messagebox.showerror("Ошибка", "Выберите папки для исходников и вывода!", bootstyle="danger")
+            ttk.messagebox.show_error("Ошибка", "Выберите папки для исходников и вывода!", parent=self.root)
             return
         Thread(target=self.main_processing, daemon=True).start()
+
+    def download_ffmpeg_if_missing(self) -> Optional[Path]:
+        """Download the latest FFmpeg from GyanD/codexffmpeg if not found."""
+        local_ffmpeg = BASE_DIR / "ffmpeg.exe"
+        if local_ffmpeg.exists():
+            log.info("FFmpeg найден локально.")
+            return local_ffmpeg
+
+        log.info("FFmpeg не найден, пытаюсь скачать последнюю версию с GitHub (GyanD/codexffmpeg)...")
+        if platform.architecture()[0] != '64bit':
+            log.error("Критическая ошибка: Авто-скачивание настроено только для 64-bit Windows.")
+            return None
+
+        api_url = "https://api.github.com/repos/GyanD/codexffmpeg/releases/latest"
+        headers_api = {'Accept': 'application/vnd.github.v3+json', 'User-Agent': 'Python-FFmpeg-Downloader/4.0'}
+        log.info(f"Запрос к GitHub API: {api_url}")
+
+        try:
+            response = requests.get(api_url, headers=headers_api, timeout=30)
+            response.raise_for_status()
+            release_data = response.json()
+            tag_name = release_data.get('tag_name')
+            assets = release_data.get('assets', [])
+            if not tag_name or not assets:
+                raise ValueError("Нет данных tag_name или assets в ответе API")
+
+            ffmpeg_version = tag_name
+            expected_filename = f"ffmpeg-{ffmpeg_version}-essentials_build.7z"
+            log.info(f"Последняя версия: {ffmpeg_version}. Ожидаемый файл: {expected_filename}")
+
+            actual_download_url = None
+            for asset in assets:
+                if asset.get('name') == expected_filename:
+                    actual_download_url = asset.get('browser_download_url')
+                    log.info(f"Найден URL: {actual_download_url}")
+                    break
+            if not actual_download_url:
+                log.error(f"Ошибка: Ассет '{expected_filename}' не найден.")
+                return None
+
+            temp_archive_path = BASE_DIR / expected_filename
+            log.info(f"Скачивание {expected_filename}...")
+            response_dl = requests.get(actual_download_url, stream=True, timeout=240, headers=headers_api)
+            response_dl.raise_for_status()
+            total_size = int(response_dl.headers.get('content-length', 0))
+
+            self.update_progress(0)  # Сброс прогресса перед скачиванием
+            with open(temp_archive_path, 'wb') as f:
+                for chunk in response_dl.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+                        progress = min(100, int((f.tell() / total_size) * 100))
+                        self.update_progress(progress)
+
+            log.info("Скачивание завершено.")
+            self.update_progress(0)  # Сброс прогресса после скачивания
+            log.info(f"Распаковка ffmpeg.exe с помощью 7z.exe...")
+
+            top_level_dir = expected_filename.replace('.7z', '')
+            ffmpeg_path_in_archive = f'{top_level_dir}/bin/ffmpeg.exe'
+
+            if local_ffmpeg.exists():
+                try:
+                    local_ffmpeg.unlink()
+                except OSError as e:
+                    log.warning(f"Предупреждение: не удалить {local_ffmpeg.name}: {e}")
+
+            command_7z = ['7z', 'x', str(temp_archive_path), f'-o{str(BASE_DIR)}', '-y', ffmpeg_path_in_archive]
+            log.info(f" - Выполнение команды: {' '.join(command_7z)}")
+
+            result_7z = subprocess.run(command_7z, capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=120)
+            if result_7z.returncode == 0:
+                log.info(" - 7z.exe успешно завершен.")
+                extracted_ffmpeg = BASE_DIR / ffmpeg_path_in_archive
+                if extracted_ffmpeg.is_file():
+                    shutil.move(str(extracted_ffmpeg), str(local_ffmpeg))
+                    log.info(f" - ffmpeg.exe перемещен в корень: {local_ffmpeg}")
+                    # Удаляем пустые папки
+                    bin_dir = BASE_DIR / top_level_dir / "bin"
+                    if bin_dir.exists() and not any(bin_dir.iterdir()):
+                        shutil.rmtree(bin_dir, ignore_errors=True)
+                        log.info(f" - Пустая папка {bin_dir} удалена")
+                    top_dir = BASE_DIR / top_level_dir
+                    if top_dir.exists() and not any(top_dir.iterdir()):
+                        shutil.rmtree(top_dir, ignore_errors=True)
+                        log.info(f" - Пустая папка {top_dir} удалена")
+                else:
+                    log.error(" - ОШИБКА: ffmpeg.exe не найден после распаковки!")
+                    return None
+            else:
+                log.error(f" - ОШИБКА: 7z.exe завершился с кодом {result_7z.returncode}.")
+                if result_7z.stderr:
+                    log.error(f"   - 7z stderr:\n{result_7z.stderr}")
+                return None
+
+            try:
+                time.sleep(0.5)
+                temp_archive_path.unlink()
+                log.info(f"Временный файл {expected_filename} удален.")
+            except OSError as e:
+                log.warning(f"Предупреждение: Не удалось удалить {expected_filename}: {e}")
+
+            if local_ffmpeg.is_file():
+                log.info(f"FFmpeg успешно скачан и распакован: {local_ffmpeg}")
+                return local_ffmpeg
+            else:
+                log.error("Ошибка: Не удалось успешно извлечь ffmpeg.exe.")
+                return None
+
+        except requests.RequestException as e:
+            log.error(f"Ошибка при скачивании: {e}")
+            return None
+        except Exception as e:
+            log.error(f"Неизвестная ошибка при скачивании FFmpeg: {e}")
+            return None
 
     def check_ffmpeg(self, ffmpeg_path: Path) -> bool:
         try:
@@ -266,6 +407,16 @@ class VideoMergerApp:
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             log.error(f"FFmpeg не найден или не работает: {ffmpeg_path}")
+            new_ffmpeg_path = self.download_ffmpeg_if_missing()
+            if new_ffmpeg_path:
+                self.ffmpeg_path.set(str(new_ffmpeg_path))
+                try:
+                    subprocess.run([str(new_ffmpeg_path), "-version"], capture_output=True, check=True)
+                    log.info(f"FFmpeg успешно установлен: {new_ffmpeg_path}")
+                    return True
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    log.error(f"Скачанный FFmpeg не работает: {new_ffmpeg_path}")
+                    return False
             return False
 
     def get_creation_date(self, file_path: Path) -> Optional[datetime.date]:
@@ -287,7 +438,7 @@ class VideoMergerApp:
                 with open(TOKEN_PICKLE_FILE, 'rb') as token:
                     creds = pickle.load(token)
             except Exception as e:
-                log.warning(f"Не удалось загрузить token.pickle: {e}")
+                log.warning(f"Не удалось загрузить token.pickle: {e}, пересоздаю")
                 creds = None
 
         if creds and creds.expired and creds.refresh_token:
@@ -295,8 +446,9 @@ class VideoMergerApp:
                 creds.refresh(google.auth.transport.requests.Request())
                 with open(TOKEN_PICKLE_FILE, 'wb') as token:
                     pickle.dump(creds, token)
+                log.info("Токен успешно обновлен")
             except Exception as e:
-                log.warning(f"Не удалось обновить токен: {e}")
+                log.error(f"Не удалось обновить токен: {e}, переавторизация требуется")
                 creds = None
 
         if not creds or not creds.valid:
@@ -308,8 +460,47 @@ class VideoMergerApp:
             creds = flow.run_local_server(port=0)
             with open(TOKEN_PICKLE_FILE, 'wb') as token:
                 pickle.dump(creds, token)
+            log.info("Новая авторизация выполнена и сохранена")
 
         return googleapiclient.discovery.build(API_SERVICE_NAME, API_VERSION, credentials=creds)
+
+    def get_analytics_service(self) -> Optional[Any]:
+        creds = None
+        if TOKEN_PICKLE_FILE.exists():
+            try:
+                with open(TOKEN_PICKLE_FILE, 'rb') as token:
+                    creds = pickle.load(token)
+            except Exception as e:
+                log.warning(f"Не удалось загрузить token.pickle для аналитики: {e}")
+                return None
+        return googleapiclient.discovery.build("youtubeAnalytics", "v2", credentials=creds)
+
+    def get_quota_info(self) -> Tuple[int, int]:
+        """Fetch current quota usage and limit from YouTube Analytics API."""
+        if not self.analytics_service:
+            self.analytics_service = self.get_analytics_service()
+            if not self.analytics_service:
+                log.error("Не удалось инициализировать YouTube Analytics сервис.")
+                return 0, 10000  # Default to 10,000 units if analytics fails
+
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        try:
+            response = self.analytics_service.reports().query(
+                ids="channel==MINE",
+                startDate=today,
+                endDate=today,
+                metrics="quotaUsed",
+                dimensions=None
+            ).execute()
+            rows = response.get('rows', [[0]])
+            quota_used = int(rows[0][0])  # Quota used today in units
+            quota_limit = 10000  # Default limit, adjust if API provides this in future
+            remaining = max(0, quota_limit - quota_used)
+            log.info(f"Квота YouTube: Использовано {quota_used} единиц, Осталось {remaining} единиц, Лимит {quota_limit} единиц")
+            return quota_used, quota_limit
+        except googleapiclient.errors.HttpError as e:
+            log.error(f"Ошибка получения квоты: {e}")
+            return 0, 10000  # Fallback to default
 
     def load_youtube_account(self):
         self.youtube_service = self.get_authenticated_service()
@@ -388,6 +579,14 @@ class VideoMergerApp:
         if not self.youtube_service:
             log.warning("YouTube сервис недоступен, загрузка невозможна")
             return None
+
+        quota_used, quota_limit = self.get_quota_info()
+        remaining_uploads = max(0, (quota_limit - quota_used) // VIDEO_UPLOAD_QUOTA_COST)
+        if remaining_uploads <= 0:
+            log.error("Достигнут лимит загрузок на сегодня. Процесс остановлен.")
+            ttk.messagebox.show_error("Ошибка", "Достигнут лимит загрузок на YouTube!", parent=self.root)
+            return None
+
         log.info(f"Начинаю загрузку файла: {file_path.name} ({file_path.stat().st_size / (1024 * 1024):.2f} MB)")
         body = {
             'snippet': {
@@ -423,8 +622,12 @@ class VideoMergerApp:
             else:
                 log.error(f"Не удалось загрузить видео: {file_path.name}")
                 return None
-        except Exception as e:
-            log.error(f"Ошибка при загрузке видео {file_path.name}: {e}")
+        except googleapiclient.errors.HttpError as e:
+            if "uploadLimitExceeded" in str(e):
+                log.error(f"Ошибка при загрузке видео {file_path.name}: Превышен лимит загрузок.")
+                ttk.messagebox.show_error("Ошибка", "Превышен лимит загрузок на YouTube!", parent=self.root)
+            else:
+                log.error(f"Ошибка при загрузке видео {file_path.name}: {e}")
             return None
         finally:
             self.update_progress(0)
@@ -471,7 +674,7 @@ class VideoMergerApp:
         ffmpeg_path = Path(self.ffmpeg_path.get())
 
         if not self.check_ffmpeg(ffmpeg_path):
-            messagebox.showerror("Ошибка", "FFmpeg недоступен!", bootstyle="danger")
+            ttk.messagebox.show_error("Ошибка", "FFmpeg недоступен!", parent=self.root)
             return
 
         if not input_folder.exists() or not output_folder.exists():
@@ -482,7 +685,17 @@ class VideoMergerApp:
         pending_uploads = state.get('pending_uploads', [])
         uploaded_files_log = load_uploaded_log()
 
-        # Шаг 1: Объединение видео и обработка одиночных фрагментов
+        if self.upload_to_youtube_enabled.get():
+            quota_used, quota_limit = self.get_quota_info()
+            remaining_uploads = max(0, (quota_limit - quota_used) // VIDEO_UPLOAD_QUOTA_COST)
+            log.info("=" * 50)
+            log.info(f"Лимит загрузки YouTube: Использовано {quota_used} единиц, Осталось {remaining_uploads} загрузок, Лимит {quota_limit} единиц")
+            log.info("=" * 50)
+            if remaining_uploads <= 0:
+                log.error("Достигнут лимит загрузок. Процесс остановлен.")
+                ttk.messagebox.show_error("Ошибка", "Достигнут лимит загрузок на YouTube!", parent=self.root)
+                return
+
         files_by_date: Dict[datetime.date, List[Tuple[float, Path]]] = defaultdict(list)
         for item in input_folder.iterdir():
             if item.is_file() and item.suffix.lower() == f".{self.output_format.get()}":
@@ -550,9 +763,7 @@ class VideoMergerApp:
             processed_dates.add(str(date))
             self.save_state({'processed_dates': list(processed_dates), 'pending_uploads': pending_uploads})
 
-        # Шаги загрузки выполняются только если включена опция
         if self.upload_to_youtube_enabled.get():
-            # Инициализация YouTube сервиса только при необходимости
             if not self.youtube_service:
                 self.youtube_service = self.get_authenticated_service()
                 if not self.youtube_service:
@@ -560,7 +771,6 @@ class VideoMergerApp:
                     return
                 self.load_youtube_account()
 
-            # Шаг 2: Загрузка объединенных видео (включая незавершенные с прошлого запуска)
             log.info("Проверяю незавершенные загрузки...")
             new_pending_uploads = []
             for upload_task in pending_uploads:
@@ -570,7 +780,6 @@ class VideoMergerApp:
                 if not self.process_upload(file_path, date_str, source_paths, uploaded_files_log, output_folder):
                     new_pending_uploads.append(upload_task)
 
-            # Шаг 3: Проверка оставшихся объединенных файлов в выходной папке
             log.info("Проверяю выходную папку на наличие незагруженных объединенных файлов...")
             for item in output_folder.iterdir():
                 if item.is_file() and item.suffix.lower() == f".{self.output_format.get()}":
@@ -587,13 +796,26 @@ class VideoMergerApp:
                     if not self.process_upload(item, date_str, source_paths, uploaded_files_log, output_folder):
                         new_pending_uploads.append(upload_task)
 
-            # Обновляем состояние
             self.save_state({'processed_dates': list(processed_dates), 'pending_uploads': new_pending_uploads})
+
+            if stats['uploaded_videos'] == 0:
+                log.info("Загружено более 3 файлов! Показываю QR-код...")
+                try:
+                    qr_url = "https://static.donationalerts.ru/uploads/qr/13684443/qr_a76ad0f6472716d3e8895e4d1227c527.png"
+                    response = requests.get(qr_url)
+                    response.raise_for_status()
+                    qr_img = Image.open(BytesIO(response.content)).resize((150, 150), Image.LANCZOS)
+                    self.qr_image = ImageTk.PhotoImage(qr_img)
+                    self.log_text.image_create(tk.END, image=self.qr_image)
+                    self.log_text.insert(tk.END, "\n")
+                    self.log_text.see(tk.END)
+                except Exception as e:
+                    log.error(f"Не удалось загрузить QR-код: {e}")
+
         else:
             log.info("Загрузка на YouTube отключена. Пропускаю шаги загрузки.")
             self.save_state({'processed_dates': list(processed_dates), 'pending_uploads': pending_uploads})
 
-        # Итоговая статистика
         log.info(f"Итог: Обработано дней: {stats['merged_days']}, Загружено видео: {stats['uploaded_videos']}, "
                  f"Удалено исходников: {stats['deleted_sources']}, Удалено объединенных: {stats['deleted_merged']}, "
                  f"Перемещено видео: {stats['moved_videos']}, Ошибок объединения: {stats['merge_errors']}, "
