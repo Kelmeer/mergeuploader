@@ -161,7 +161,7 @@ class VideoMergerApp:
         doughnut_path = BASE_DIR / "Doughnut.png"
         if not doughnut_path.exists():
             log.info("Doughnut.png не найден локально, начинаю скачивание...")
-            url = "https://github.com/Kelmeer/mergeuploader/blob/main/Doughnut.png"
+            url = "https://raw.githubusercontent.com/Kelmeer/mergeuploader/refs/heads/main/Doughnut.png"
             try:
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
