@@ -8,13 +8,14 @@ import time
 import shutil
 import logging
 import json
+import base64
 import webbrowser
 from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple, Set, Any
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 from tkinter import filedialog
@@ -35,6 +36,19 @@ except ImportError:
     print("pip install google-api-python-client google-auth-oauthlib google-auth-httplib2")
     sys.exit(1)
 
+# --- Определяем базовую директорию для файлов (для работы с PyInstaller) ---
+def get_base_dir() -> Path:
+    if getattr(sys, 'frozen', False):
+        # Если запущен как .exe, используем директорию, где находится .exe
+        base_path = Path(sys.executable).parent
+        log.info(f"Запущен как .exe, базовая директория: {base_path}")
+        return base_path
+    else:
+        # Если запущен как скрипт, используем текущую рабочую директорию
+        base_path = Path.cwd()
+        log.info(f"Запущен как скрипт, базовая директория: {base_path}")
+        return base_path
+
 # --- Логирование ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -43,12 +57,12 @@ log = logging.getLogger(__name__)
 stats = defaultdict(int)
 
 # --- Файлы настроек и состояния ---
-STATE_FILE = Path("processing_state.json")
-SETTINGS_FILE = Path("settings.json")
-TOKEN_PICKLE_FILE = Path("token.pickle")
-UPLOADED_LOG_FILE = Path("uploaded_videos.log")
-CLIENT_SECRETS_FILE = Path("client_secrets.json")
-BASE_DIR = Path.cwd()
+BASE_DIR = get_base_dir()
+STATE_FILE = BASE_DIR / "processing_state.json"
+SETTINGS_FILE = BASE_DIR / "settings.json"
+TOKEN_PICKLE_FILE = BASE_DIR / "token.pickle"
+UPLOADED_LOG_FILE = BASE_DIR / "uploaded_videos.log"
+ICON_FILE = BASE_DIR / "favicon.ico"
 
 # --- Константы YouTube API ---
 API_SERVICE_NAME = "youtube"
@@ -56,11 +70,27 @@ API_VERSION = "v3"
 SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube.readonly", "https://www.googleapis.com/auth/yt-analytics.readonly", "https://www.googleapis.com/auth/userinfo.profile"]
 VIDEO_UPLOAD_QUOTA_COST = 1600  # Стоимость загрузки одного видео (единиц)
 
+# --- Encoded client secrets (Base64) ---
+CLIENT_SECRETS_ENCODED = "eyJpbnN0YWxsZWQiOnsiY2xpZW50X2lkIjoiNDgyNzczNDg2NDI0LWk2ZHJmOXZjY3QycXJ0ZWYzNmszb2pob2s1YTJoNWw3LmFwcHMuZ29vZ2xldXNlcmNvbnRlbnQuY29tIiwicHJvamVjdF9pZCI6InZlZGVvcmVjb3JkZXIiLCJhdXRoX3VyaSI6Imh0dHBzOi8vYWNjb3VudHMuZ29vZ2xlLmNvbS9vL29hdXRoMi9hdXRoIiwidG9rZW5fdXJpIjoiaHR0cHM6Ly9vYXV0aDIuZ29vZ2xlYXBpcy5jb20vdG9rZW4iLCJhdXRoX3Byb3ZpZGVyX3g1MDlfY2VydF91cmwiOiJodHRwczovL3d3dy5nb29nbGVhcGlzLmNvbS9vYXV0aDIvdjEvY2VydHMiLCJjbGllbnRfc2VjcmV0IjoiR09DU1BYLVRQNXAxeFJMSnpQMmJPUHlaR1dxY0tnSlpFbjEiLCJyZWRpcmVjdF91cmlzIjpbImh0dHA6Ly9sb2NhbGhvc3QiXX19"
+
 class VideoMergerApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Video Merger and YouTube Uploader")
         self.root.geometry("800x950")
+
+        # Устанавливаем иконку окна
+        try:
+            log.info(f"Пытаюсь загрузить иконку из: {ICON_FILE}")
+            if ICON_FILE.exists():
+                log.info("Файл иконки найден, устанавливаю иконку окна")
+                self.root.iconbitmap(str(ICON_FILE))
+                log.info(f"Иконка окна успешно установлена: {ICON_FILE}")
+            else:
+                log.warning(f"Иконка {ICON_FILE} не найдена, используется стандартная иконка Tkinter")
+        except tk.TclError as e:
+            log.error(f"Ошибка установки иконки окна: {e}")
+            log.warning("Убедитесь, что favicon.ico является валидным .ico файлом и находится в правильной директории")
 
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
@@ -71,8 +101,8 @@ class VideoMergerApp:
         style.configure("TEntry", font=("Helvetica", 10))
         style.configure("TCombobox", font=("Helvetica", 10))
         style.configure("TCheckbutton", font=("Helvetica", 10))
-        style.configure("custom.TButton", borderwidth=0, background="#2b2b2b", relief="flat")
-        style.map("custom.TButton", background=[("active", "#2b2b2b")])
+        style.configure("custom.TButton", borderwidth=0, background="transparent", relief="flat")
+        style.map("custom.TButton", background=[("active", "transparent")])
 
         self.input_folder = tk.StringVar()
         self.output_folder = tk.StringVar()
@@ -161,7 +191,7 @@ class VideoMergerApp:
         doughnut_path = BASE_DIR / "Doughnut.png"
         if not doughnut_path.exists():
             log.info("Doughnut.png не найден локально, начинаю скачивание...")
-            url = "https://raw.githubusercontent.com/Kelmeer/mergeuploader/refs/heads/main/Doughnut.png"
+            url = "https://github.com/Kelmeer/mergeuploader/blob/main/Doughnut.png"
             try:
                 response = requests.get(url, stream=True, timeout=30)
                 response.raise_for_status()
@@ -255,11 +285,11 @@ class VideoMergerApp:
         self.progress = ttk.Progressbar(log_frame, maximum=100, mode='determinate', bootstyle="success")
         self.progress.grid(row=0, column=0, sticky=(tk.W, tk.E), padx=5, pady=5)
 
-        self.log_text = tk.Text(log_frame, height=7, font=("Helvetica", 10), bg="#2b2b2b", fg="#ffffff", insertbackground="white")
+        self.log_text = tk.Text(log_frame, height=7, font=("Helvetica", 10), bg="#2b2b2b", fg="#ffffff", insertbackground="white", state='disabled')
         self.log_text.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), padx=5, pady=5)
 
-        # Кнопка "Запустить обработку" (слева, без фона) и кнопка с Doughnut.png (справа) в одной строке
-        button_frame = ttk.Frame(main_frame, bootstyle="")
+        # Кнопка "Запустить обработку" (слева) и кнопка с Doughnut.png (справа) в одной строке
+        button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=4, column=0, columnspan=3, pady=15, sticky=(tk.W, tk.E))
 
         # Кнопка "Запустить обработку" (слева)
@@ -269,7 +299,7 @@ class VideoMergerApp:
         try:
             if not self.download_doughnut_image():
                 raise FileNotFoundError("Не удалось скачать Doughnut.png")
-            doughnut_img = Image.open("Doughnut.png").resize((25, 25), Image.LANCZOS)
+            doughnut_img = Image.open(BASE_DIR / "Doughnut.png").resize((25, 25), Image.LANCZOS)
             if doughnut_img.mode != "RGBA":
                 doughnut_img = doughnut_img.convert("RGBA")
             self.doughnut_image = ImageTk.PhotoImage(doughnut_img)
@@ -302,9 +332,75 @@ class VideoMergerApp:
 
     def start_processing(self):
         if not self.input_folder.get() or not self.output_folder.get():
-            ttk.messagebox.show_error("Ошибка", "Выберите папки для исходников и вывода!", parent=self.root)
+            messagebox.show_error("Ошибка", "Выберите папки для исходников и вывода!", parent=self.root)
             return
         Thread(target=self.main_processing, daemon=True).start()
+
+    def download_7z_if_missing(self) -> Optional[Path]:
+        """Download 7z.exe and 7z.dll from GitHub if not found."""
+        local_7z = BASE_DIR / "7z.exe"
+        local_7z_dll = BASE_DIR / "7z.dll"
+
+        # Проверяем наличие обоих файлов
+        if local_7z.exists() and local_7z_dll.exists():
+            log.info("7z.exe и 7z.dll найдены локально.")
+            return local_7z
+
+        log.info("7z.exe или 7z.dll не найдены, начинаю скачивание с GitHub...")
+        if platform.system() != "Windows":
+            log.error("Критическая ошибка: Авто-скачивание 7z.exe настроено только для Windows.")
+            return None
+
+        # URL для скачивания 7z.exe и 7z.dll
+        url_7z_exe = "https://github.com/Kelmeer/mergeuploader/raw/refs/heads/main/7z.exe"
+        url_7z_dll = "https://github.com/Kelmeer/mergeuploader/raw/refs/heads/main/7z.dll"
+
+        try:
+            # Скачивание 7z.exe
+            if not local_7z.exists():
+                log.info(f"Скачивание 7z.exe...")
+                response = requests.get(url_7z_exe, stream=True, timeout=240)
+                response.raise_for_status()
+                total_size = int(response.headers.get('content-length', 0))
+
+                self.update_progress(0)
+                with open(local_7z, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            progress = min(100, int((f.tell() / total_size) * 100))
+                            self.update_progress(progress)
+                log.info(f"7z.exe успешно скачан: {local_7z}")
+            else:
+                log.info("7z.exe уже существует, пропускаю скачивание.")
+
+            # Скачивание 7z.dll
+            if not local_7z_dll.exists():
+                log.info(f"Скачивание 7z.dll...")
+                response = requests.get(url_7z_dll, stream=True, timeout=240)
+                response.raise_for_status()
+                total_size = int(response.headers.get('content-length', 0))
+
+                self.update_progress(0)
+                with open(local_7z_dll, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            progress = min(100, int((f.tell() / total_size) * 100))
+                            self.update_progress(progress)
+                log.info(f"7z.dll успешно скачан: {local_7z_dll}")
+            else:
+                log.info("7z.dll уже существует, пропускаю скачивание.")
+
+            self.update_progress(0)
+            return local_7z
+
+        except requests.RequestException as e:
+            log.error(f"Ошибка при скачивании 7z.exe или 7z.dll: {e}")
+            return None
+        except Exception as e:
+            log.error(f"Неизвестная ошибка при скачивании 7z.exe или 7z.dll: {e}")
+            return None
 
     def download_ffmpeg_if_missing(self) -> Optional[Path]:
         """Download the latest FFmpeg from GyanD/codexffmpeg if not found."""
@@ -316,6 +412,12 @@ class VideoMergerApp:
         log.info("FFmpeg не найден, пытаюсь скачать последнюю версию с GitHub (GyanD/codexffmpeg)...")
         if platform.architecture()[0] != '64bit':
             log.error("Критическая ошибка: Авто-скачивание настроено только для 64-bit Windows.")
+            return None
+
+        # Убедимся, что 7z.exe доступен
+        local_7z = self.download_7z_if_missing()
+        if not local_7z:
+            log.error("Не удалось получить 7z.exe, извлечение FFmpeg невозможно.")
             return None
 
         api_url = "https://api.github.com/repos/GyanD/codexffmpeg/releases/latest"
@@ -372,32 +474,33 @@ class VideoMergerApp:
                 except OSError as e:
                     log.warning(f"Предупреждение: не удалить {local_ffmpeg.name}: {e}")
 
-            command_7z = ['7z', 'x', str(temp_archive_path), f'-o{str(BASE_DIR)}', '-y', ffmpeg_path_in_archive]
-            log.info(f" - Выполнение команды: {' '.join(command_7z)}")
-
-            result_7z = subprocess.run(command_7z, capture_output=True, text=True, encoding='utf-8', errors='ignore', timeout=120)
-            if result_7z.returncode == 0:
-                log.info(" - 7z.exe успешно завершен.")
+            # Извлечение с помощью 7z.exe
+            try:
+                cmd = [str(local_7z), "x", str(temp_archive_path), f"-o{BASE_DIR}", ffmpeg_path_in_archive, "-y"]
+                result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+                log.info("Извлечение успешно завершено.")
+                log.debug(f"Вывод 7z.exe: {result.stdout}")
                 extracted_ffmpeg = BASE_DIR / ffmpeg_path_in_archive
                 if extracted_ffmpeg.is_file():
                     shutil.move(str(extracted_ffmpeg), str(local_ffmpeg))
-                    log.info(f" - ffmpeg.exe перемещен в корень: {local_ffmpeg}")
+                    log.info(f"ffmpeg.exe перемещен в корень: {local_ffmpeg}")
                     # Удаляем пустые папки
                     bin_dir = BASE_DIR / top_level_dir / "bin"
                     if bin_dir.exists() and not any(bin_dir.iterdir()):
                         shutil.rmtree(bin_dir, ignore_errors=True)
-                        log.info(f" - Пустая папка {bin_dir} удалена")
+                        log.info(f"Пустая папка {bin_dir} удалена")
                     top_dir = BASE_DIR / top_level_dir
                     if top_dir.exists() and not any(top_dir.iterdir()):
                         shutil.rmtree(top_dir, ignore_errors=True)
-                        log.info(f" - Пустая папка {top_dir} удалена")
+                        log.info(f"Пустая папка {top_dir} удалена")
                 else:
-                    log.error(" - ОШИБКА: ffmpeg.exe не найден после распаковки!")
+                    log.error("ОШИБКА: ffmpeg.exe не найден после распаковки!")
                     return None
-            else:
-                log.error(f" - ОШИБКА: 7z.exe завершился с кодом {result_7z.returncode}.")
-                if result_7z.stderr:
-                    log.error(f"   - 7z stderr:\n{result_7z.stderr}")
+            except subprocess.CalledProcessError as e:
+                log.error(f"Ошибка при распаковке с помощью 7z.exe: {e.stderr}")
+                return None
+            except Exception as e:
+                log.error(f"Неизвестная ошибка при распаковке: {e}")
                 return None
 
             try:
@@ -453,6 +556,15 @@ class VideoMergerApp:
             return None
 
     def get_authenticated_service(self) -> Optional[Any]:
+        # Decode the base64-encoded client secrets
+        try:
+            client_secrets_bytes = base64.b64decode(CLIENT_SECRETS_ENCODED)
+            client_secrets_json = client_secrets_bytes.decode('utf-8')
+            client_secrets = json.loads(client_secrets_json)
+        except Exception as e:
+            log.error(f"Ошибка декодирования CLIENT_SECRETS: {e}")
+            return None
+
         creds = None
         if TOKEN_PICKLE_FILE.exists():
             try:
@@ -473,11 +585,9 @@ class VideoMergerApp:
                 creds = None
 
         if not creds or not creds.valid:
-            if not CLIENT_SECRETS_FILE.exists():
-                log.error("Файл client_secrets.json не найден!")
-                return None
-            flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_secrets_file(
-                str(CLIENT_SECRETS_FILE), SCOPES)
+            # Используем декодированные client secrets
+            flow = google_auth_oauthlib.flow.InstalledAppFlow.from_client_config(
+                client_secrets, SCOPES)
             creds = flow.run_local_server(port=0)
             with open(TOKEN_PICKLE_FILE, 'wb') as token:
                 pickle.dump(creds, token)
@@ -605,7 +715,7 @@ class VideoMergerApp:
         remaining_uploads = max(0, (quota_limit - quota_used) // VIDEO_UPLOAD_QUOTA_COST)
         if remaining_uploads <= 0:
             log.error("Достигнут лимит загрузок на сегодня. Процесс остановлен.")
-            ttk.messagebox.show_error("Ошибка", "Достигнут лимит загрузок на YouTube!", parent=self.root)
+            messagebox.show_error("Ошибка", "Достигнут лимит загрузок на YouTube!", parent=self.root)
             return None
 
         log.info(f"Начинаю загрузку файла: {file_path.name} ({file_path.stat().st_size / (1024 * 1024):.2f} MB)")
@@ -646,7 +756,7 @@ class VideoMergerApp:
         except googleapiclient.errors.HttpError as e:
             if "uploadLimitExceeded" in str(e):
                 log.error(f"Ошибка при загрузке видео {file_path.name}: Превышен лимит загрузок.")
-                ttk.messagebox.show_error("Ошибка", "Превышен лимит загрузок на YouTube!", parent=self.root)
+                messagebox.show_error("Ошибка", "Превышен лимит загрузок на YouTube!", parent=self.root)
             else:
                 log.error(f"Ошибка при загрузке видео {file_path.name}: {e}")
             return None
@@ -695,7 +805,7 @@ class VideoMergerApp:
         ffmpeg_path = Path(self.ffmpeg_path.get())
 
         if not self.check_ffmpeg(ffmpeg_path):
-            ttk.messagebox.show_error("Ошибка", "FFmpeg недоступен!", parent=self.root)
+            messagebox.show_error("Ошибка", "FFmpeg недоступен!", parent=self.root)
             return
 
         if not input_folder.exists() or not output_folder.exists():
@@ -714,7 +824,7 @@ class VideoMergerApp:
             log.info("=" * 50)
             if remaining_uploads <= 0:
                 log.error("Достигнут лимит загрузок. Процесс остановлен.")
-                ttk.messagebox.show_error("Ошибка", "Достигнут лимит загрузок на YouTube!", parent=self.root)
+                messagebox.show_error("Ошибка", "Достигнут лимит загрузок на YouTube!", parent=self.root)
                 return
 
         files_by_date: Dict[datetime.date, List[Tuple[float, Path]]] = defaultdict(list)
@@ -827,8 +937,10 @@ class VideoMergerApp:
                     response.raise_for_status()
                     qr_img = Image.open(BytesIO(response.content)).resize((150, 150), Image.LANCZOS)
                     self.qr_image = ImageTk.PhotoImage(qr_img)
+                    self.log_text.configure(state='normal')
                     self.log_text.image_create(tk.END, image=self.qr_image)
                     self.log_text.insert(tk.END, "\n")
+                    self.log_text.configure(state='disabled')
                     self.log_text.see(tk.END)
                 except Exception as e:
                     log.error(f"Не удалось загрузить QR-код: {e}")
@@ -865,11 +977,13 @@ class TextHandler(logging.Handler):
 
     def emit(self, record):
         msg = self.format(record)
+        self.text_widget.configure(state='normal')
         if "ЗАГРУЖЕНО ВИДЕО" in msg:
             self.text_widget.tag_configure("large", font=("Helvetica", 14, "bold"))
             self.text_widget.insert(tk.END, msg + '\n', "large")
         else:
             self.text_widget.insert(tk.END, msg + '\n')
+        self.text_widget.configure(state='disabled')
         self.text_widget.see(tk.END)
 
 if __name__ == "__main__":
