@@ -156,6 +156,25 @@ class VideoMergerApp:
     def open_donation_link(self):
         webbrowser.open("https://www.donationalerts.com/r/dr_klmn")
 
+    def download_doughnut_image(self):
+        """Download Doughnut.png from the internet if it's not available locally."""
+        doughnut_path = BASE_DIR / "Doughnut.png"
+        if not doughnut_path.exists():
+            log.info("Doughnut.png не найден локально, начинаю скачивание...")
+            url = "https://github.com/Kelmeer/mergeuploader/blob/main/Doughnut.png"
+            try:
+                response = requests.get(url, stream=True, timeout=30)
+                response.raise_for_status()
+                with open(doughnut_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                log.info(f"Doughnut.png успешно скачан и сохранен в {doughnut_path}")
+            except requests.RequestException as e:
+                log.error(f"Ошибка скачивания Doughnut.png: {e}")
+                return False
+        return True
+
     def create_gui(self):
         main_frame = ttk.Frame(self.root, padding="15", bootstyle="dark")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
@@ -248,6 +267,8 @@ class VideoMergerApp:
 
         # Кнопка с Doughnut.png (справа)
         try:
+            if not self.download_doughnut_image():
+                raise FileNotFoundError("Не удалось скачать Doughnut.png")
             doughnut_img = Image.open("Doughnut.png").resize((25, 25), Image.LANCZOS)
             if doughnut_img.mode != "RGBA":
                 doughnut_img = doughnut_img.convert("RGBA")
